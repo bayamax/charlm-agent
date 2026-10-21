@@ -26,10 +26,13 @@ ap.add_argument("--model", default=""); ap.add_argument("--max-steps", type=int,
 ap.add_argument("--think", type=int, default=1, help="1: the answer starts with a short worked trace {...} (the steps the rule takes)")
 ap.add_argument("--repeat", type=int, default=1, help="1: the game sends the goal and the operations again every turn (they stay near)")
 ap.add_argument("--check", type=int, default=1, help="1: the trace reads out every need of a helper before calling it ok (agent5 and before: 0)")
-ap.add_argument("--shuffle", type=int, default=1, help="1: STATE lists the variables in a random order (agent6 and before: the goal's variable first, a crutch the model leaned on)")
+ap.add_argument("--shuffle", type=float, default=-1, help="the chance that a STATE line lists its variables in a random order rather than the goal's "
+               "first (the protocol: the game puts them first). Default: data 0.25 (so a game that does not still works); play scores both, 0 and 1")
 ap.add_argument("--raise-fx", type=int, default=1, help="1: the step that raises a missing need names each raiser with its effect ('tools up: forge+2'; agent6 and before: the name only)")
 A = ap.parse_args()
 R = random.Random(A.seed + (0 if A.split == "train" else 77777))
+RS = random.Random(A.seed + 999)   # the order of STATE lines: its own stream, so the episodes are the same whatever the order
+SHUF = A.shuffle if A.shuffle >= 0 else 0.25
 TRAIN = A.split == "train"
 VARS = (["life", "gold", "food", "mana", "heat", "fuel", "ammo", "water", "wood", "stone", "energy", "score", "hp", "keys", "coins", "light",
          "speed", "trust", "noise", "stock", "power", "air", "rest", "fun",
@@ -157,7 +160,7 @@ def show_ops(ops):
 def head(goals, ops): return "GOAL: " + " and ".join(f"{g} {c} {k}" for g, c, k in goals) + "\nOPS: " + show_ops(ops)
 def state_line(st):
     ks = list(st)
-    if A.shuffle: ks = sorted(ks, key=lambda k: R.random())   # a fresh order each time
+    if RS.random() < SHUF: ks = sorted(ks, key=lambda k: RS.random())   # a fresh order
     return "STATE: " + " ".join(f"{v}={st[v]}" for v in ks)
 
 
@@ -186,7 +189,9 @@ elif __name__ == "__main__":   # closed loop with the model: each turn it picks,
     sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
     import charlm_run as CR
     m = CR.Model(A.model); res = {}; ex = []
-    for lv in [int(x) for x in A.levels.split(",")]:
+    orders = [0.0, 1.0] if A.shuffle < 0 else [A.shuffle]
+    for lv, SHUF in [(int(x), o) for x in A.levels.split(",") for o in orders]:
+        R = random.Random(A.seed + 77777 + lv); RS = random.Random(A.seed + 999 + lv)   # the same episodes for each order
         won = steps = opt = bad = 0; k = 0
         while k < A.n:
             e = episode(lv)
@@ -203,6 +208,6 @@ elif __name__ == "__main__":   # closed loop with the model: each turn it picks,
             won += done; steps += (len(turns) // 2 - 1) if done else 0; opt += best if done else 0
             if not done and len(ex) < 6: ex.append(turns)
         res[lv] = (won / A.n, steps / max(won, 1), opt / max(won, 1), bad / A.n)
-        print(f"[goal] level {lv}: reached {100 * won / A.n:.1f}% of {A.n}; steps {steps / max(won, 1):.2f} (shortest {opt / max(won, 1):.2f}); "
+        print(f"[goal] level {lv} ({'goal first' if SHUF == 0 else 'any order' if SHUF == 1 else f'{SHUF:.0%} shuffled'}): reached {100 * won / A.n:.1f}% of {A.n}; steps {steps / max(won, 1):.2f} (shortest {opt / max(won, 1):.2f}); "
               f"bad or impossible picks {100 * bad / A.n:.1f}%", flush=True)
     for t in ex: print("[goal] failed:", json.dumps(t)[:600])
