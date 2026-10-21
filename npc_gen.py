@@ -34,6 +34,7 @@ ap.add_argument("--model", default="nvidia/Qwen3.6-35B-A3B-NVFP4"); ap.add_argum
 ap.add_argument("--seed", type=int, default=0); ap.add_argument("--max-len", type=int, default=8192); ap.add_argument("--gpu-mem", type=float, default=0.90)
 ap.add_argument("--chunk", type=int, default=0, help="prompts per call, with a progress line after each (0: all at once)")
 ap.add_argument("--eager", type=int, default=0, help="1: no CUDA graphs (their memory matters on 12 GB)")
+ap.add_argument("--genres", default="cozy", help="villager modes: the games to mix, e.g. cozy,friends,dark")
 ap.add_argument("--max-seqs", type=int, default=256, help="sequences in flight (fewer on a 12 GB card: the sampler's warm-up wants their logits at once)")
 A = ap.parse_args()
 R = random.Random(A.seed + {"train": 0, "bench": 1000003, "judge": 7, "help": 3000017, "helpbench": 4000037, "villager": 5000011, "villagerbench": 6000053}[A.mode])
@@ -288,6 +289,112 @@ VIL_INTENTS = {
 }
 
 
+# other games use the same talk with their own people, state and tone: a friend-collection life sim and a dark fantasy
+FRIEND_TRAITS = ["easily excited", "a hopeless romantic", "always hungry", "a worrier", "a show-off", "very shy", "a daydreamer", "a neat freak",
+                 "a big talker", "a little clumsy", "super competitive", "a gossip", "an early bird", "a night owl", "a softie", "stubborn"]
+FRIEND_JOBS = ["work at the cafe", "study at the island school", "run the clothing shop", "work as a part-time chef", "are between jobs", "paint murals",
+               "sing at the fountain on weekends", "fix bikes", "deliver mail", "work at the amusement park"]
+FRIEND_STATE = ["has a crush on {nb}", "had a fight with {nb} yesterday", "just became best friends with {nb}", "is worried about a test tomorrow",
+                "is craving {food}", "wants a new {thing}", "had a weird dream about flying fish", "lost a favourite hat", "is saving up for a trip",
+                "wants to confess to {nb} but is scared", "is in a great mood after a nice nap", "feels lonely today", "won a dance contest"]
+FOODS = ["ramen", "strawberry cake", "curry", "pizza", "a giant hamburger", "sushi", "pancakes", "ice cream", "fried chicken", "a melon"]
+FTHINGS = ["jacket", "pet", "hairstyle", "guitar", "bike", "room interior", "pair of sneakers"]
+DARK_ROLES = ["a weary knight who lost his lord", "a fire keeper, blind and gentle", "a merchant who laughs at nothing", "a blacksmith hammering by a dying forge",
+              "a pilgrim who has forgotten her own name", "a prisoner in a hanging cage", "a cursed sorcerer selling spells", "a crestfallen warrior sitting by the stairs",
+              "an old maiden who prays for the dead", "a cheerful thief with a broken leg", "a lost knight searching for his daughter", "a hollowing soldier who still guards the gate"]
+DARK_PLACES = ["the ruined chapel", "the shrine of embers", "the flooded crypt", "the burning tower", "the valley of plague", "the abandoned castle gate",
+               "the bridge of a thousand bones", "the cathedral of silence", "the swamp below the old mill", "the cliffs of the hanged"]
+DARK_STATE = ["The player just slew the giant of the gate.", "The player has died many times in the crypt.", "The player came back carrying a strange black key.",
+              "The player has not spoken to you since the bell tolled.", "The player gave you a flask of healing water last time.", "The player is bleeding and low on strength.",
+              "The player has just arrived for the first time.", "The player defeated the knight you once served."]
+DARK_RUMOURS = ["a dragon sleeps beneath the bridge", "the king still walks his halls", "the fog lifts only when the bell rings", "a door in the crypt opens only for the dead",
+                "the old witch in the swamp trades in memories", "hollow soldiers fear the light of the moon"]
+GENRES = {"cozy": "a cozy life-sim with friendly animal villagers in a little town",
+          "friends": "a quirky friend-collection life sim on a small island, where the islanders have crushes, quarrels, cravings and dreams",
+          "dark": "a grim, dark fantasy action game in a dying cursed kingdom, where the few people left speak in weary, cryptic, melancholy words"}
+GEN_INTENTS = {"cozy": None,
+               "friends": {"greet": "greets the islander", "doing": "asks what they are up to", "worry": "asks if something is bothering them (their state)",
+                           "food": "offers them some food (name it)", "gift_other": "gives them a present (name it)", "advice": "asks for advice about their own life (love, friends, work)",
+                           "neighbour": "asks about one of the other islanders (by name)", "gossip": "asks for the latest gossip", "compliment": "compliments them",
+                           "tease": "teases them", "feeling": "shares how they feel", "self": "tells them their name", "recall": "asks them to remember what the player said about themselves",
+                           "dream": "asks about their dream or what they want", "goodbye": "says goodbye"},
+               "dark": {"greet": "greets the character", "who": "asks who they are or why they are here", "place": "asks about this place or where to go next",
+                        "rumour": "asks what they know (a rumour)", "memory": "brings up what the player did lately (the memory on the card)",
+                        "help": "asks for help, a trade or a service they offer", "gift_other": "offers them an item (name it: a flask, a ring, a key, an ember, souls)",
+                        "feeling": "says they are tired, hurt or afraid", "tease": "is rude or threatens them", "despair": "asks if there is any hope",
+                        "self": "tells them their name", "recall": "asks them to remember what the player said about themselves", "goodbye": "says farewell"}}
+
+
+def gen_card(genre):
+    """a card for one of the other games (the cozy one is vil_card)"""
+    if genre == "friends":
+        nbs = [(fresh_name(), None, R.choice(FRIEND_TRAITS), R.choice(["best friend", "classmate", "neighbour", "ex", "crush", "rival"])) for _ in range(2)]
+        st = R.choice(FRIEND_STATE).format(nb=nbs[0][0], food=R.choice(FOODS), thing=R.choice(FTHINGS))
+        return dict(genre=genre, name=fresh_name(), trait=R.choice(FRIEND_TRAITS), trait2=R.choice(FRIEND_TRAITS), job=R.choice(FRIEND_JOBS), state=st,
+                    fav=R.choice(FOODS), nbs=nbs, time=R.choice(TIMES), weather=R.choice(["sunny", "rainy", "windy", "cloudy", "stormy"]),
+                    catch=R.choice(CATCH_A) + R.choice(CATCH_B) if R.random() < 0.5 else "", place=R.choice(["Pudding Island", "Mango Isle", "Sprout Island", "Tofu Isle"]))
+    nbs = [(fresh_name(), None, R.choice(DARK_ROLES), "acquaintance")]
+    return dict(genre=genre, name=fresh_name(), role=R.choice(DARK_ROLES), place=R.choice(DARK_PLACES), memory=R.choice(DARK_STATE),
+                rumour=R.choice(DARK_RUMOURS), offer=R.choice(["mend weapons for souls", "sell spells", "keep the fire lit for travellers", "sell arrows and herbs",
+                "know the way through the fog", "trade rings for stories", "offer nothing but a warning"]), nbs=nbs,
+                hour=R.choice(["The bell has not rung for an age.", "Ash falls like snow.", "The fog is thick tonight.", "Rain hammers the stones."]))
+
+
+def gen_text(v, fmt, talking_to=None):
+    if v["genre"] == "friends":
+        nb = "; ".join(f"{n} ({t}, your {r})" for n, _, t, r in v["nbs"])
+        lines = [f"You are {v['name']}, an islander on {v['place']}. You are {v['trait']} and {v['trait2']}, and you {v['job']}." +
+                 (f" You often say \"{v['catch']}\"." if v["catch"] else ""), f"Favourite food: {v['fav']}. Friends: {nb}.",
+                 f"Now: {v['time']}, {v['weather']}. Today you {v['state']}."]
+    else:
+        lines = [f"You are {v['name']}, {v['role']}, waiting at {v['place']}.", f"You {v['offer']}. You have heard that {v['rumour']}.",
+                 f"{v['hour']} {v['memory']}", f"You know {v['nbs'][0][0]}, {v['nbs'][0][2]}."]
+    if talking_to: lines.append(f"You are talking with {talking_to}.")
+    return ("\n" if fmt == 0 else " ").join(lines)
+
+
+TONE = {"friends": "funny, quirky and earnest like an islander in a friend-collection game; let today's state (crush, quarrel, craving, worry) show",
+        "dark": "weary, cryptic and melancholy like a survivor in a dark fantasy game, sometimes with grim humour; never cheerful or cute; speak of the "
+                "place, the curse and the player's deeds in hints rather than plain facts"}
+
+
+def gen_prompt(v, plans):
+    its = GEN_INTENTS[v["genre"]]
+    ds = "\n".join(f"Talk {i + 1} (with the player): the player's lines, in order: " + "; ".join(f"({j + 1}) {its[k]}" for j, k in enumerate(p))
+                   for i, p in enumerate(plans))
+    n0 = v["nbs"][0]
+    return (f"Here is a character in {GENRES[v['genre']]}, with the game's state at this moment:\n\n" + gen_text(v, 0) + "\n\n"
+            f"Write {len(plans)} talks with the player, each a new visit:\n{ds}\n"
+            f"Then talk {len(plans) + 1}: {n0[0]} ({n0[2]}) comes to {v['name']} and they talk, 3 to 5 exchanges, {n0[0]} speaking first each time.\n\n"
+            "Rules for the character's lines: 1 or 2 short sentences (under 30 words); " + TONE[v["genre"]] + "; react to what was just said and to the "
+            "moment when it fits, without reciting the card; if asked something you do not know, say so in character; simple English; no emojis, "
+            "asterisks or stage directions; never mention being an AI, a character or a game. The player writes casually.\n\n"
+            'Return only JSON: {"talks": [{"turns": [{"player": str, "villager": str}, ...]}, ...], "neighbour_talk": [{"neighbour": str, "villager": str}, ...]}')
+
+
+def gen_plan(genre):
+    its = GEN_INTENTS[genre]; n = R.choice([3, 4, 4, 5, 5, 6]); seq = ["greet"] if R.random() < 0.5 else []
+    pool = [k for k in its if k not in ("greet", "recall", "goodbye")]
+    while len(seq) < n - 1:
+        k = R.choice(pool)
+        if k in seq: continue
+        seq.append(k)
+        if k == "self" and R.random() < 0.7: seq.append("recall")
+    seq.append("goodbye" if R.random() < 0.4 else R.choice([k for k in pool if k not in seq]))
+    return seq[:7]
+
+
+GBENCH_KEYS = {"friends": ["greet", "doing", "worry", "food", "advice", "neighbour", "gossip", "tease", "feeling", "dream"],
+               "dark": ["greet", "who", "place", "rumour", "memory", "help", "gift_other", "feeling", "tease", "despair"]}
+
+
+def genbench_prompt(v):
+    its = GEN_INTENTS[v["genre"]]; ks = GBENCH_KEYS[v["genre"]]
+    return (f"Here is a character in {GENRES[v['genre']]}, with the game's state at this moment:\n\n" + gen_text(v, 0) + "\n\n"
+            "Write test lines a player might say to this character, one of each, casual and short:\n" + "; ".join(f"{k} ({its[k]})" for k in ks) + ".\n"
+            "Return only JSON: {" + ", ".join(f'"{k}": str' for k in ks) + "}")
+
+
 def vil_card():
     temper = R.choice(list(TEMPERS)); season = R.choice(SEASONS); likes = R.sample(ITEMS, 2); dislike = R.choice([x for x in ITEMS if x not in likes])
     nbs = [(fresh_name(), R.choice(SPECIES), R.choice(list(TEMPERS)), R.choice(RELS)) for _ in range(2)]
@@ -363,38 +470,48 @@ def vil_rows(v, d):
         ts = dl.get("turns") if isinstance(dl, dict) else dl
         turns = [(clean(t.get("player", "")), clean(t.get("villager", ""))) for t in (ts or []) if isinstance(t, dict)]
         if len(turns) < 2 or not all(p and ok_reply(r) for p, r in turns): continue
-        msgs = [{"role": "system", "content": vil_text(v, R.randrange(2))}]
+        msgs = [{"role": "system", "content": card_of(v, R.randrange(2))}]
         for p, r in turns: msgs += [{"role": "user", "content": p}, {"role": "assistant", "content": r}]
-        out.append({"messages": msgs, "src": "villager"})
+        out.append({"messages": msgs, "src": "villager_" + v.get("genre", "cozy")})
     nt = d.get("neighbour_talk")
     nt = nt.get("turns") if isinstance(nt, dict) else nt
     turns = [(clean(t.get("neighbour", "")), clean(t.get("villager", ""))) for t in (nt or []) if isinstance(t, dict)]
     if len(turns) >= 2 and all(p and ok_reply(r) for p, r in turns):
-        n0 = v["nbs"][0]; msgs = [{"role": "system", "content": vil_text(v, R.randrange(2), f"{n0[0]} the {n0[1]}, your {n0[3]}")}]
+        n0 = v["nbs"][0]; who = f"{n0[0]} the {n0[1]}, your {n0[3]}" if n0[1] else n0[0]
+        msgs = [{"role": "system", "content": card_of(v, R.randrange(2), who)}]
         for p, r in turns: msgs += [{"role": "user", "content": p}, {"role": "assistant", "content": r}]
-        out.append({"messages": msgs, "src": "villager_nb"})
+        out.append({"messages": msgs, "src": "villager_nb_" + v.get("genre", "cozy")})
     return out
 
 
+def card_of(v, fmt, talking_to=None): return gen_text(v, fmt, talking_to) if v.get("genre", "cozy") != "cozy" else vil_text(v, fmt, talking_to)
+
+
 def vilbench_row(i, d, v):
+    if v.get("genre", "cozy") != "cozy":
+        ks = GBENCH_KEYS[v["genre"]]
+        if not all(isinstance(d.get(k), str) and d[k].strip() for k in ks): return None
+        nm = NAMES_BENCH[i % len(NAMES_BENCH)]
+        probes = [{"kind": v["genre"] + ":" + k, "turns": [clean(d[k])]} for k in ks]
+        probes.append({"kind": v["genre"] + ":recall", "turns": [f"Hi, I'm {nm}.", "Greetings.", "Do you remember my name?"], "answer": nm})
+        return {"card": card_of(v, i % 2), "card_fields": v, "probes": probes, "genre": v["genre"]}
     keys = ["greet", "weather", "doing", "gift_like", "gift_dislike", "advice", "neighbour", "event", "memory", "tease", "feeling"]
     if not all(isinstance(d.get(k), str) and d[k].strip() for k in keys): return None
     probes = [{"kind": k, "turns": [clean(d[k])]} for k in keys]
     nm = NAMES_BENCH[i % len(NAMES_BENCH)]
     probes.append({"kind": "recall", "turns": [f"Hi, I'm {nm}!", "Oh, hi! Nice to meet you!", "Do you remember my name?"], "answer": nm})
     probes.append({"kind": "town", "turns": [f"When is {v['shop']} open?"], "answer": v["hours"].split(" to ")[0]})
-    return {"card": vil_text(v, i % 2), "card_fields": v, "probes": probes}
+    return {"card": vil_text(v, i % 2), "card_fields": v, "probes": probes, "genre": "cozy"}
 
 
-VJUDGE = ("You grade one line written by a small model playing a villager in a cozy life-sim game (think of friendly animal neighbours in a "
-          "little town).\n\nVILLAGER CARD AND GAME STATE:\n{card}\n\nCONVERSATION SO FAR:\n{conv}\n\nVILLAGER'S LINE TO GRADE:\n{reply}\n\n{note}"
+VJUDGE = ("You grade one line written by a small model playing a character in {genre}.\n\nCHARACTER CARD AND GAME STATE:\n{card}\n\nCONVERSATION SO FAR:\n{conv}\n\nCHARACTER'S LINE TO GRADE:\n{reply}\n\n{note}"
           "Score each from 0 to 2:\n"
           "- answers: responds to what the player just said (2 = directly and sensibly, 1 = partly or vaguely, 0 = ignores it, repeats it or is nonsense)\n"
           "- consistent: agrees with the card and the game state (2 = yes, 1 = small slip, 0 = contradicts it, e.g. loves a gift it dislikes, wrong "
           "weather, wrong shop hours, confuses who is who)\n"
-          "- in_character: sounds like THIS villager's temper and voice (0 = talks like an AI assistant, mentions being an AI or a game, or another persona)\n"
+          "- in_character: sounds like THIS character and the game's tone (0 = talks like an AI assistant, mentions being an AI or a game, another persona, or the wrong tone, e.g. cute in a grim game)\n"
           "- fluent: grammatical, coherent English (0 = garbled)\n"
-          "- charm: warm, lively and fun like a good life-sim villager line (2), plain but fine (1), flat, odd or off-putting (0)\n"
+          "- charm: a line a player would enjoy in this game, lively and with flavour (2), plain but fine (1), flat, odd or off-putting (0)\n"
           "Then 'usable': true only if the game could show this exact line at this moment without embarrassment.\n"
           'Return only JSON: {{"answers": int, "consistent": int, "in_character": int, "fluent": int, "charm": int, "usable": bool}}')
 
@@ -487,9 +604,12 @@ def main():
     T0 = time.time()
     if A.mode in ("villager", "villagerbench"):
         llm, used = engine(); print(f"[gen] {A.mode} with {used}: {A.n} requests", flush=True)
-        vs = [vil_card() for _ in range(A.n)]; seen = set(); vs = [v for v in vs if not (v["name"] in seen or seen.add(v["name"]))]
-        if A.mode == "villager": plans = [[vil_plan(), vil_plan()] for _ in vs]; prompts = [vil_prompt(v, p) for v, p in zip(vs, plans)]; mt = 2200
-        else: plans = [None] * len(vs); prompts = [vilbench_prompt(v) for v in vs]; mt = 700
+        gl = A.genres.split(","); vs = [vil_card() if (g := gl[i % len(gl)]) == "cozy" else gen_card(g) for i in range(A.n)]
+        seen = set(); vs = [v for v in vs if not (v["name"] in seen or seen.add(v["name"]))]
+        if A.mode == "villager":
+            plans = [[vil_plan(), vil_plan()] if v.get("genre", "cozy") == "cozy" else [gen_plan(v["genre"]), gen_plan(v["genre"])] for v in vs]
+            prompts = [vil_prompt(v, p) if v.get("genre", "cozy") == "cozy" else gen_prompt(v, p) for v, p in zip(vs, plans)]; mt = 2200
+        else: plans = [None] * len(vs); prompts = [vilbench_prompt(v) if v.get("genre", "cozy") == "cozy" else genbench_prompt(v) for v in vs]; mt = 700
         n_ok = n_bad = 0; k = A.chunk or len(prompts); fo = open(A.out, "w"); fr = open(A.out + ".raw", "w")
         for a in range(0, len(prompts), k):   # chunk by chunk, each written at once: a box that dies keeps what it made
             texts = run(llm, prompts[a:a + k], 0.9 if A.mode == "villager" else 0.8, mt)
@@ -541,7 +661,9 @@ def main():
         for r in rows:
             conv = "\n".join(("PLAYER: " if i % 2 == 0 else "NPC: ") + t for i, t in enumerate(r["turns"]))
             note = f"(For reference, the correct reply should contain: {r['answer']}.)\n\n" if r.get("answer") else ""
-            prompts.append((VJUDGE if r.get("villager") or "catchphrase" in r["card"] else JUDGE).format(card=r["card"], conv=conv, reply=r["reply"] or "(empty)", note=note))
+            g_ = r.get("genre") or ("cozy" if "catchphrase" in r["card"] else None)
+            if g_: prompts.append(VJUDGE.format(genre=GENRES[g_], card=r["card"], conv=conv, reply=r["reply"] or "(empty)", note=note))
+            else: prompts.append(JUDGE.format(card=r["card"], conv=conv, reply=r["reply"] or "(empty)", note=note))
         texts = run(llm, prompts, 0.0, 120); n_bad = 0
         with open(A.out, "w") as f:
             for r, t in zip(rows, texts):
