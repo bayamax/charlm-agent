@@ -36,6 +36,8 @@ ap.add_argument("--model", default="nvidia/Qwen3.6-35B-A3B-NVFP4"); ap.add_argum
 ap.add_argument("--seed", type=int, default=0); ap.add_argument("--max-len", type=int, default=8192); ap.add_argument("--gpu-mem", type=float, default=0.90)
 ap.add_argument("--chunk", type=int, default=0, help="prompts per call, with a progress line after each (0: all at once)")
 ap.add_argument("--eager", type=int, default=0, help="1: no CUDA graphs (their memory matters on 12 GB)")
+ap.add_argument("--min-grade", type=int, default=1, help="vfilter: a line graded below this is bad (2: keep only talks of lines a player would enjoy)")
+ap.add_argument("--strict", type=int, default=0, help="vfilter: 1, the judge is told to give 2 only to lines a player would really enjoy")
 ap.add_argument("--genres", default="cozy", help="villager modes: the games to mix, e.g. cozy,friends,dark")
 ap.add_argument("--max-seqs", type=int, default=256, help="sequences in flight (fewer on a 12 GB card: the sampler's warm-up wants their logits at once)")
 A = ap.parse_args()
@@ -524,6 +526,9 @@ FJUDGE = ("You check training data for a small model that plays characters in vi
           "1 = fine but plain or a little off; 0 = bad: nonsense, does not answer, wrong speaker (e.g. calls itself by its own name as if "
           "someone else), contradicts the card or the talk, breaks character, or broken English.\n"
           'Return only JSON: {{"grades": [int, ...]}} with one grade per character line, in order.')
+FSTRICT = ("Be strict, like an editor choosing lines for a shipped game: give 2 only to a line a player would really enjoy here - natural, "
+           "clearly in this character's own voice and tone, answering exactly what was said, true to the card and the moment. Plain, generic, "
+           "slightly odd or slightly off-topic lines get 1. Most lines in a typical batch should NOT get 2.\n")
 
 
 def vfilter(llm):
@@ -533,14 +538,18 @@ def vfilter(llm):
         for m in ms:
             if m["role"] == "user": talk.append(f"OTHER: {m['content']}")
             elif m["role"] == "assistant": k += 1; talk.append(f"C{k}: {m['content']}")
-        prompts.append(FJUDGE.format(card=card, talk="\n".join(talk)))
+        q = FJUDGE.format(card=card, talk="\n".join(talk))
+        if A.strict: q = q.replace("Return only JSON", FSTRICT + "Return only JSON")
+        prompts.append(q)
     texts = run(llm, prompts, 0.0, 120); kept = cut = dropped = unparsed = 0; hist = collections.Counter()
+    gf = open(A.out + ".grades.jsonl", "w")   # every talk with its grades: other thresholds later without the judge
     with open(A.out, "w") as f:
         for r, t in zip(rows, texts):
             g = (parse_json(t) or {}).get("grades") if isinstance(parse_json(t), dict) else None
+            gf.write(json.dumps({"messages": r["messages"], "src": r.get("src"), "grades": g}) + "\n")
             n_ast = sum(m["role"] == "assistant" for m in r["messages"])
             if not isinstance(g, list) or len(g) != n_ast or not all(isinstance(x, int) for x in g): unparsed += 1; continue
-            hist.update(g); bad = next((i for i, x in enumerate(g) if x <= 0), None)
+            hist.update(g); bad = next((i for i, x in enumerate(g) if x < A.min_grade), None)
             if bad is None: f.write(json.dumps(r) + "\n"); kept += 1; continue
             if bad < 2: dropped += 1; continue
             out, k = [], 0
@@ -551,6 +560,7 @@ def vfilter(llm):
                 out.append(m)
             while out and out[-1]["role"] != "assistant": out.pop()
             r = dict(r); r["messages"] = out; f.write(json.dumps(r) + "\n"); cut += 1
+    gf.close()
     print(f"[filter] {len(rows)} talks: {kept} kept whole, {cut} cut before a bad line, {dropped} dropped, {unparsed} unparsed; "
           f"line grades {dict(sorted(hist.items()))} -> {A.out}", flush=True)
 
