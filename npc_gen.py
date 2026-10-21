@@ -16,6 +16,8 @@
          (season, weather, time, today's event, what the villager is doing, what the player did lately, the shops), two
          talks with the player and one with a neighbour; replies short, warm, in the villager's voice, reacting to the state
   villagerbench  held-out villagers (their own names) with probes of those kinds
+  vfilter  (the user: grade the teacher's own lines too) every character line of generated talks graded by the judge
+         model; a talk is cut before its first bad line and dropped when less than two exchanges are left
   judge  grades replies (from npc_bench.py) against the card and the conversation: answers it, fits the card, in
          character, fluent, and usable as-is in a game
 
@@ -23,10 +25,10 @@
   python3 npc_gen.py bench --n 120 --out npc_bench.jsonl
   python3 npc_gen.py judge --inp replies.jsonl --out judged.jsonl
 """
-import argparse, json, os, random, re, sys, time
+import argparse, collections, json, os, random, re, sys, time
 
 ap = argparse.ArgumentParser()
-ap.add_argument("mode", choices=["train", "bench", "judge", "help", "helpbench", "villager", "villagerbench"])
+ap.add_argument("mode", choices=["train", "bench", "judge", "help", "helpbench", "villager", "villagerbench", "vfilter"])
 ap.add_argument("--n", type=int, default=100, help="requests (train: one card and two dialogues each; bench: one card each)")
 ap.add_argument("--out", required=True); ap.add_argument("--inp", default="")
 ap.add_argument("--from-raw", default="", help="parse the outputs a run kept (OUT.raw) again instead of generating")
@@ -37,7 +39,7 @@ ap.add_argument("--eager", type=int, default=0, help="1: no CUDA graphs (their m
 ap.add_argument("--genres", default="cozy", help="villager modes: the games to mix, e.g. cozy,friends,dark")
 ap.add_argument("--max-seqs", type=int, default=256, help="sequences in flight (fewer on a 12 GB card: the sampler's warm-up wants their logits at once)")
 A = ap.parse_args()
-R = random.Random(A.seed + {"train": 0, "bench": 1000003, "judge": 7, "help": 3000017, "helpbench": 4000037, "villager": 5000011, "villagerbench": 6000053}[A.mode])
+R = random.Random(A.seed + {"train": 0, "bench": 1000003, "judge": 7, "help": 3000017, "helpbench": 4000037, "villager": 5000011, "villagerbench": 6000053, "vfilter": 11}[A.mode])
 
 ROLES = ["blacksmith", "innkeeper", "town guard", "travelling merchant", "farmer", "village priest", "street kid", "ship captain", "herbalist",
          "librarian", "tavern bard", "retired adventurer", "mine foreman", "fisherwoman", "butler of a noble house", "stable hand", "wizard's apprentice",
@@ -516,6 +518,43 @@ VJUDGE = ("You grade one line written by a small model playing a character in {g
           'Return only JSON: {{"answers": int, "consistent": int, "in_character": int, "fluent": int, "charm": int, "usable": bool}}')
 
 
+FJUDGE = ("You check training data for a small model that plays characters in video games. Below is a character card with the game's "
+          "state, and a talk where someone speaks to the character.\n\nCARD:\n{card}\n\nTALK:\n{talk}\n\n"
+          "Grade every CHARACTER line (C1, C2, ...) from 0 to 2: 2 = natural, in character, answers what was said, agrees with the card; "
+          "1 = fine but plain or a little off; 0 = bad: nonsense, does not answer, wrong speaker (e.g. calls itself by its own name as if "
+          "someone else), contradicts the card or the talk, breaks character, or broken English.\n"
+          'Return only JSON: {{"grades": [int, ...]}} with one grade per character line, in order.')
+
+
+def vfilter(llm):
+    rows = [json.loads(l) for l in open(A.inp)]; prompts = []
+    for r in rows:
+        ms = r["messages"]; card = next((m["content"] for m in ms if m["role"] == "system"), "(none)"); k = 0; talk = []
+        for m in ms:
+            if m["role"] == "user": talk.append(f"OTHER: {m['content']}")
+            elif m["role"] == "assistant": k += 1; talk.append(f"C{k}: {m['content']}")
+        prompts.append(FJUDGE.format(card=card, talk="\n".join(talk)))
+    texts = run(llm, prompts, 0.0, 120); kept = cut = dropped = unparsed = 0; hist = collections.Counter()
+    with open(A.out, "w") as f:
+        for r, t in zip(rows, texts):
+            g = (parse_json(t) or {}).get("grades") if isinstance(parse_json(t), dict) else None
+            n_ast = sum(m["role"] == "assistant" for m in r["messages"])
+            if not isinstance(g, list) or len(g) != n_ast or not all(isinstance(x, int) for x in g): unparsed += 1; continue
+            hist.update(g); bad = next((i for i, x in enumerate(g) if x <= 0), None)
+            if bad is None: f.write(json.dumps(r) + "\n"); kept += 1; continue
+            if bad < 2: dropped += 1; continue
+            out, k = [], 0
+            for m in r["messages"]:
+                if m["role"] == "assistant":
+                    if k == bad: break
+                    k += 1
+                out.append(m)
+            while out and out[-1]["role"] != "assistant": out.pop()
+            r = dict(r); r["messages"] = out; f.write(json.dumps(r) + "\n"); cut += 1
+    print(f"[filter] {len(rows)} talks: {kept} kept whole, {cut} cut before a bad line, {dropped} dropped, {unparsed} unparsed; "
+          f"line grades {dict(sorted(hist.items()))} -> {A.out}", flush=True)
+
+
 def parse_json(t):
     t = re.sub(r"<think>.*?</think>", "", t, flags=re.S); a, b = t.find("{"), t.rfind("}")
     if a < 0 or b <= a: return None
@@ -602,6 +641,8 @@ def helpbench_row(i, d, c, seen):
 
 def main():
     T0 = time.time()
+    if A.mode == "vfilter":
+        llm, used = engine(); print(f"[filter] with {used}", flush=True); vfilter(llm); return
     if A.mode in ("villager", "villagerbench"):
         llm, used = engine(); print(f"[gen] {A.mode} with {used}: {A.n} requests", flush=True)
         gl = A.genres.split(","); vs = [vil_card() if (g := gl[i % len(gl)]) == "cozy" else gen_card(g) for i in range(A.n)]
