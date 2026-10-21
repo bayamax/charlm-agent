@@ -19,6 +19,7 @@ ap.add_argument("--pairs", required=True, help='{"card", "turns", "chosen", "rej
 ap.add_argument("--anchor", default="", help='{"messages": [...]} conversations learned plainly beside the pairs')
 ap.add_argument("--out", required=True); ap.add_argument("--beta", type=float, default=0.1); ap.add_argument("--lr", type=float, default=5e-6)
 ap.add_argument("--epochs", type=float, default=2.0); ap.add_argument("--batch", type=int, default=8); ap.add_argument("--anchor-batch", type=int, default=4)
+ap.add_argument("--micro", type=int, default=2, help="pairs per forward pass (the batch is accumulated over them; halved on an out-of-memory)")
 ap.add_argument("--sft-w", type=float, default=0.2, help="weight of plain learning on the chosen replies"); ap.add_argument("--anchor-w", type=float, default=0.5)
 ap.add_argument("--max-ctx", type=int, default=1600, help="characters of context kept (the end of it)"); ap.add_argument("--seed", type=int, default=0)
 A = ap.parse_args()
@@ -110,20 +111,27 @@ pairs = [json.loads(l) for l in open(A.pairs)]; random.shuffle(pairs)
 anchor = [json.loads(l)["messages"] for l in open(A.anchor)] if A.anchor else []
 P = [(ctx_ids(p["card"], p["turns"]), p["chosen"], p["rejected"]) for p in pairs]
 steps = int(A.epochs * len(P) / A.batch); opt = torch.optim.AdamW(pol.parameters(), lr=A.lr, betas=(0.9, 0.95), weight_decay=0.0)
-out(f"[dpo] {len(P)} pairs, {len(anchor)} anchor conversations; {steps} steps of {A.batch} pairs + {A.anchor_batch if anchor else 0} anchors; beta {A.beta}, lr {A.lr}")
-T0 = time.time(); acc = []; ptr = 0
+out(f"[dpo] {len(P)} pairs, {len(anchor)} anchor conversations; {steps} steps of {A.batch} pairs + {A.anchor_batch if anchor else 0} anchors ({A.micro} per forward); beta {A.beta}, lr {A.lr}")
+T0 = time.time(); acc = []; ptr = 0; MICRO = A.micro
 for step in range(steps):
     lr = A.lr * min(1.0, (step + 1) / 10) * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * step / max(1, steps))))
     for g in opt.param_groups: g["lr"] = lr
     if ptr + A.batch > len(P): random.shuffle(P); ptr = 0
     b = P[ptr:ptr + A.batch]; ptr += A.batch
-    ch = [seq(c, x) for c, x, _ in b]; rj = [seq(c, y) for c, _, y in b]
-    with torch.no_grad(): rc, _ = batch_logp(ref, ch); rr, _ = batch_logp(ref, rj)
-    pc, nc = batch_logp(pol, ch); pr, _ = batch_logp(pol, rj)
-    margin = A.beta * ((pc - rc) - (pr - rr)); loss = -F.logsigmoid(margin).mean() + A.sft_w * (-(pc / nc).mean())
-    if anchor:
-        al, an = batch_logp(pol, [conv_seq(random.choice(anchor)) for _ in range(A.anchor_batch)]); loss = loss + A.anchor_w * (-(al.sum() / an.sum()))
-    opt.zero_grad(set_to_none=True); loss.backward(); torch.nn.utils.clip_grad_norm_(pol.parameters(), 1.0); opt.step()
+    opt.zero_grad(set_to_none=True); margins = []
+    try:
+        for i in range(0, len(b), MICRO):   # the batch in micro-batches, the gradient accumulated
+            mb = b[i:i + MICRO]; ch = [seq(c, x) for c, x, _ in mb]; rj = [seq(c, y) for c, _, y in mb]
+            with torch.no_grad(): rc, _ = batch_logp(ref, ch); rr, _ = batch_logp(ref, rj)
+            pc, nc = batch_logp(pol, ch); pr, _ = batch_logp(pol, rj)
+            margin = A.beta * ((pc - rc) - (pr - rr)); loss = (-F.logsigmoid(margin).sum() + A.sft_w * (-(pc / nc).sum())) / len(b)
+            loss.backward(); margins.append(margin.detach())
+        for i in range(0, A.anchor_batch if anchor else 0, MICRO):
+            k = min(MICRO, A.anchor_batch - i); al, an = batch_logp(pol, [conv_seq(random.choice(anchor)) for _ in range(k)])
+            (A.anchor_w * (-(al.sum() / an.sum())) * k / A.anchor_batch).backward()
+    except torch.OutOfMemoryError:
+        opt.zero_grad(set_to_none=True); torch.cuda.empty_cache(); MICRO = max(1, MICRO // 2); out(f"[oom] micro -> {MICRO}"); ptr -= A.batch; continue
+    torch.nn.utils.clip_grad_norm_(pol.parameters(), 1.0); opt.step(); margin = torch.cat(margins)
     acc.append((float((margin > 0).float().mean()), float(margin.mean())))
     if (step + 1) % 25 == 0 or step + 1 == steps:
         a_, m_ = zip(*acc); out(f"[dpo] step {step + 1}/{steps}: chosen above rejected {100 * sum(a_) / len(a_):.0f}%, margin {sum(m_) / len(m_):.2f}, lr {lr:.1e}, {(time.time() - T0) / 60:.1f} min"); acc = []
