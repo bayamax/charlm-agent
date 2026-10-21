@@ -10,20 +10,21 @@
 
 | ファイル | 中身 |
 |---|---|
-| `models/agent6_4bit.pt` | **最新**。会話 + 行動選び。迷ったらこれ |
+| `models/agent11_4bit.pt` | **最新**。会話 + 行動選び、3 種類のゲームの住人らしい会話。迷ったらこれ |
+| `models/agent6_4bit.pt` | 1 つ前の版 |
 | `models/npc4_4bit.pt` | 会話だけに絞った版 |
 
 ## すぐ試す
 
 ```bash
 pip install torch
-python3 village.py --model models/agent6_4bit.pt --days 4 --out village.md   # 3 人の村人が 4 日暮らす（CPU で 1〜2 分）
-python3 goal_gen.py play --model models/agent6_4bit.pt --n 100 --split test   # 行動選びの採点（見たことのない名前の問題）
+python3 village.py --model models/agent11_4bit.pt --days 4 --out village.md   # 3 人の村人が 4 日暮らす（CPU で 1〜2 分）
+python3 goal_gen.py play --model models/agent11_4bit.pt --n 100 --split test   # 行動選びの採点（見たことのない名前の問題）
 ```
 
 ```python
 from charlm_run import Model
-m = Model("models/agent6_4bit.pt")
+m = Model("models/agent11_4bit.pt")
 print(m.reply(["You are Tob, the blacksmith of Elm.\n\nHello! Can you fix my sword?"], temp=0.7))
 print(m.reply(["GOAL: life >= 1\nOPS: <a> life+1 gold-3 | <b> gold+2 | <c> life-1\nSTATE: life=0 gold=7"], n=260))
 ```
@@ -44,6 +45,8 @@ print(m.reply(["GOAL: life >= 1\nOPS: <a> life+1 gold-3 | <b> gold+2 | <c> life-
 | | `npc_gen.py` | 大きめのモデル（vLLM で Qwen）で NPC 会話・案内データを作る／返答を採点する |
 | | `soda_prep.py` | SODA（人物設定つきの会話）を学習用に変換 |
 | | `agent_gen.py` | 初期の「発言 + 行動タグ」形式のデータ |
+| **品質** | `talk_rules.py` | 採点役なしで壊れた行と事実の間違いを見つける（データの選別、返答の足切り） |
+| | `judge_audit.py`, `eval/gold_villager_lines.jsonl` | 採点役の点数を人の目の正解セット（150 行）と照合する |
 | **採点** | `chat_bits.py` | 会話の予測誤差（雑談の力が落ちていないかの確認） |
 | | `npc_bench.py` | NPC の返答を作って並べる、採点の集計 |
 
