@@ -22,6 +22,8 @@ ap.add_argument("--epochs", type=float, default=2.0); ap.add_argument("--batch",
 ap.add_argument("--micro", type=int, default=2, help="pairs per forward pass (the batch is accumulated over them; halved on an out-of-memory)")
 ap.add_argument("--sft-w", type=float, default=0.2, help="weight of plain learning on the chosen replies"); ap.add_argument("--anchor-w", type=float, default=0.5)
 ap.add_argument("--max-ctx", type=int, default=1600, help="characters of context kept (the end of it)"); ap.add_argument("--seed", type=int, default=0)
+ap.add_argument("--val", default="", help='held-out {"messages"} conversations: bits per assistant character every --val-every steps, the best kept as model_best.pt')
+ap.add_argument("--val-every", type=int, default=40); ap.add_argument("--val-n", type=int, default=200)
 A = ap.parse_args()
 random.seed(A.seed); torch.manual_seed(A.seed)
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
@@ -107,12 +109,29 @@ def conv_seq(msgs):
     return ids[:min(SEQ, 2048)], m[:min(SEQ, 2048)]
 
 
+VAL = [conv_seq(json.loads(l)["messages"]) for l in list(open(A.val))[:A.val_n]] if A.val else []
+
+
+@torch.no_grad()
+def val_bits():
+    pol.eval(); tot = n = 0.0
+    for i in range(0, len(VAL), 4):
+        lp, cnt = batch_logp(pol, VAL[i:i + 4]); tot += float(-lp.sum()); n += float(cnt.sum())
+    pol.train(); return tot / max(n, 1) / math.log(2)
+
+
+def save(path):
+    sd = {k: v.detach().cpu() for k, v in pol.state_dict().items()}; ck = dict(CK); ck["model"] = sd; torch.save(ck, path)
+
+
 pairs = [json.loads(l) for l in open(A.pairs)]; random.shuffle(pairs)
 anchor = [json.loads(l)["messages"] for l in open(A.anchor)] if A.anchor else []
 P = [(ctx_ids(p["card"], p["turns"]), p["chosen"], p["rejected"]) for p in pairs]
 steps = int(A.epochs * len(P) / A.batch); opt = torch.optim.AdamW(pol.parameters(), lr=A.lr, betas=(0.9, 0.95), weight_decay=0.0)
 out(f"[dpo] {len(P)} pairs, {len(anchor)} anchor conversations; {steps} steps of {A.batch} pairs + {A.anchor_batch if anchor else 0} anchors ({A.micro} per forward); beta {A.beta}, lr {A.lr}")
 T0 = time.time(); acc = []; ptr = 0; MICRO = A.micro
+best = val_bits() if VAL else None
+if VAL: out(f"[dpo] held-out before: {best:.3f} bits per assistant character ({len(VAL)} conversations)")
 for step in range(steps):
     lr = A.lr * min(1.0, (step + 1) / 10) * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * step / max(1, steps))))
     for g in opt.param_groups: g["lr"] = lr
@@ -135,5 +154,9 @@ for step in range(steps):
     acc.append((float((margin > 0).float().mean()), float(margin.mean())))
     if (step + 1) % 25 == 0 or step + 1 == steps:
         a_, m_ = zip(*acc); out(f"[dpo] step {step + 1}/{steps}: chosen above rejected {100 * sum(a_) / len(a_):.0f}%, margin {sum(m_) / len(m_):.2f}, lr {lr:.1e}, {(time.time() - T0) / 60:.1f} min"); acc = []
-pol = pol.cpu(); CK["model"] = pol.state_dict(); torch.save(CK, os.path.join(A.out, "model_final.pt"))
+    if VAL and ((step + 1) % A.val_every == 0 or step + 1 == steps):
+        v = val_bits(); out(f"[dpo] held-out at step {step + 1}: {v:.3f} bits" + (" (best, saved)" if v < best else ""))
+        if v < best: best = v; save(os.path.join(A.out, "model_best.pt"))
+save(os.path.join(A.out, "model_final.pt"))
+if VAL: out(f"[dpo] held-out best {best:.3f} bits -> model_best.pt")
 out(f"[dpo] saved {os.path.join(A.out, 'model_final.pt')} [{(time.time() - T0) / 60:.1f} min]")
