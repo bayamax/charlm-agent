@@ -11,6 +11,11 @@
          dialogues whose player asks the way, how to do something, what something is, for a recommendation, shares a
          feeling, makes small talk; the NPC answers naturally in its role, 1 to 4 sentences, explanations simple and right
   helpbench  held-out probes of those kinds
+  villager  (the user's aim: the villagers of a cozy life-sim, once written as rules, played by the model) a villager
+         card made here (species, temperament, catchphrase, likes, neighbours) with the game's state of the moment
+         (season, weather, time, today's event, what the villager is doing, what the player did lately, the shops), two
+         talks with the player and one with a neighbour; replies short, warm, in the villager's voice, reacting to the state
+  villagerbench  held-out villagers (their own names) with probes of those kinds
   judge  grades replies (from npc_bench.py) against the card and the conversation: answers it, fits the card, in
          character, fluent, and usable as-is in a game
 
@@ -21,7 +26,7 @@
 import argparse, json, os, random, re, sys, time
 
 ap = argparse.ArgumentParser()
-ap.add_argument("mode", choices=["train", "bench", "judge", "help", "helpbench"])
+ap.add_argument("mode", choices=["train", "bench", "judge", "help", "helpbench", "villager", "villagerbench"])
 ap.add_argument("--n", type=int, default=100, help="requests (train: one card and two dialogues each; bench: one card each)")
 ap.add_argument("--out", required=True); ap.add_argument("--inp", default="")
 ap.add_argument("--from-raw", default="", help="parse the outputs a run kept (OUT.raw) again instead of generating")
@@ -31,7 +36,7 @@ ap.add_argument("--chunk", type=int, default=0, help="prompts per call, with a p
 ap.add_argument("--eager", type=int, default=0, help="1: no CUDA graphs (their memory matters on 12 GB)")
 ap.add_argument("--max-seqs", type=int, default=256, help="sequences in flight (fewer on a 12 GB card: the sampler's warm-up wants their logits at once)")
 A = ap.parse_args()
-R = random.Random(A.seed + {"train": 0, "bench": 1000003, "judge": 7, "help": 3000017, "helpbench": 4000037}[A.mode])
+R = random.Random(A.seed + {"train": 0, "bench": 1000003, "judge": 7, "help": 3000017, "helpbench": 4000037, "villager": 5000011, "villagerbench": 6000053}[A.mode])
 
 ROLES = ["blacksmith", "innkeeper", "town guard", "travelling merchant", "farmer", "village priest", "street kid", "ship captain", "herbalist",
          "librarian", "tavern bard", "retired adventurer", "mine foreman", "fisherwoman", "butler of a noble house", "stable hand", "wizard's apprentice",
@@ -236,6 +241,164 @@ JUDGE = ("You grade one reply written by a small model playing a non-player char
          'Return only JSON: {{"answers": int, "consistent": int, "in_character": int, "fluent": int, "usable": bool}}')
 
 
+# ---- villagers of a cozy life-sim -------------------------------------------------------------------------------------
+SPECIES = ["cat", "dog", "rabbit", "bear", "frog", "duck", "squirrel", "penguin", "deer", "hamster", "owl", "wolf", "koala", "goat", "pig", "mouse",
+           "horse", "sheep", "alligator", "octopus", "eagle", "hippo", "monkey", "kangaroo", "ostrich", "lion", "tiger", "cow", "chicken", "anteater"]
+TEMPERS = {   # our own eight: how each talks
+    "sleepy": "easygoing and slow, fond of naps and snacks, never in a hurry and a bit silly",
+    "sporty": "loud and full of energy, always training, competitive and always cheering the player on",
+    "grumpy": "gruff and old-fashioned, full of complaints, but secretly kind and caring",
+    "fancy": "polite and a little vain, fond of style and fine things and generous with elegant compliments",
+    "gentle": "kind and tidy, fond of cooking and quiet days, and sweet to everyone",
+    "bubbly": "excited about everything, dreaming of being a star, fast-talking and dramatic",
+    "proud": "elegant with a sharp tongue and high standards, a teaser who warms up to friends",
+    "big-sister": "tough and frank, protective like a big sister, and crazy about sports and junk food",
+}
+CATCH_A = ["nib", "zoo", "pip", "bun", "kip", "moo", "fuzz", "yip", "bop", "tum", "squee", "plop", "dor", "lulu", "honk", "ribb", "meep", "toot", "chirp", "grr"]
+CATCH_B = ["bit", "zoom", "sy", "kins", "ster", "doo", "pop", "y", "aroo", "bles", "o", "ly", "it", "pie", "boo"]
+HOBBIES = ["fishing", "gardening", "reading", "music", "fashion", "working out", "catching bugs", "cooking", "stargazing", "painting", "dancing", "collecting shells"]
+ITEMS = ["a peach", "an apple", "a pear", "a cherry", "an orange", "a coconut", "a red tulip", "a white rose", "a yellow lily", "a blue pansy", "a sea bass",
+         "a goldfish", "a butterfly", "a beetle", "a seashell", "a wooden chair", "a cozy rug", "a little lamp", "a straw hat", "a striped shirt",
+         "a raincoat", "a fancy dress", "a sports jersey", "a cupcake", "a cup of coffee", "a pile of weeds", "an old boot", "a tin can", "a fossil",
+         "a bag of turnips", "a pine cone", "a snowflake ornament", "a pumpkin", "a music box", "a soccer ball", "a teddy bear", "a book of poems"]
+SEASONS = ["spring", "summer", "autumn", "winter"]
+WEATHERS = {"spring": ["sunny", "light rain", "cloudy", "windy"], "summer": ["sunny and hot", "a thunderstorm", "clear", "humid"],
+            "autumn": ["windy", "cloudy", "light rain", "crisp and clear"], "winter": ["snowing", "cold and clear", "cloudy", "a snowstorm"]}
+TIMES = ["early morning", "morning", "noon", "afternoon", "evening", "night", "late at night"]
+EVENTS = ["none", "none", "a fishing contest at the river", "a bug-catching day", "the town's birthday party for {nb}", "the cherry blossom festival",
+          "fireworks over the beach tonight", "a meteor shower tonight", "market day in the plaza", "a pumpkin festival", "the first snow", "a music night at the cafe"]
+DOING = ["watering flowers", "fishing by the river", "reading on a bench", "jogging around the plaza", "humming a song", "looking at the sky",
+         "eating a snack", "sweeping the porch", "catching bugs", "drawing in a sketchbook", "walking home with groceries", "stretching", "napping under a tree"]
+MEMORY = ["Yesterday the player gave you {item}.", "The player caught a huge fish this morning.", "The player has not visited you for three days.",
+          "Last week the player helped you find your lost cap.", "The player forgot your birthday last month.", "The player just paid off their house loan.",
+          "The player planted flowers in front of your house.", "This morning the player bumped into you while running.", "none", "none"]
+SHOPS = ["the general store", "the tailor", "the cafe", "the museum", "the town hall", "the bakery", "the flower stand"]
+RELS = ["best friend", "good friend", "rival", "neighbour you find a bit odd", "neighbour you admire", "old friend"]
+VIL_INTENTS = {
+    "greet": "greets the villager", "weather": "talks about the weather, the season or the time of day",
+    "doing": "asks what the villager is doing right now", "gift_like": "gives the villager one of the things it LIKES (name the item)",
+    "gift_dislike": "gives the villager the thing it DISLIKES (name the item)", "gift_other": "gives the villager some other small item (name it)",
+    "advice": "asks for advice or a suggestion (where to fish, what to plant, what to wear, what to do today)",
+    "neighbour": "asks what the villager thinks of one of its neighbours (by name)", "event": "asks about today's event or what is going on in town",
+    "memory": "brings up or asks about what the player did lately (the memory on the card)", "compliment": "compliments the villager",
+    "tease": "teases the villager or is a bit rude", "favor": "asks if the villager needs anything or wants help",
+    "feeling": "shares how they feel today", "town": "asks about a shop or place in town (opening hours, what it sells)",
+    "self": "tells the villager their name", "recall": "asks the villager to remember what the player said about themselves",
+    "hobby": "asks about the villager's hobby or favourite things", "goodbye": "says goodbye",
+}
+
+
+def vil_card():
+    temper = R.choice(list(TEMPERS)); season = R.choice(SEASONS); likes = R.sample(ITEMS, 2); dislike = R.choice([x for x in ITEMS if x not in likes])
+    nbs = [(fresh_name(), R.choice(SPECIES), R.choice(list(TEMPERS)), R.choice(RELS)) for _ in range(2)]
+    shop = R.choice(SHOPS); o, c = R.randint(6, 10), R.randint(17, 23)
+    ev = R.choice(EVENTS).format(nb=nbs[0][0]); mem = R.choice(MEMORY).format(item=R.choice(ITEMS))
+    return dict(name=fresh_name(), species=R.choice(SPECIES), temper=temper, catch=R.choice(CATCH_A) + R.choice(CATCH_B), hobby=R.choice(HOBBIES),
+                likes=likes, dislike=dislike, nbs=nbs, season=season, weather=R.choice(WEATHERS[season]), time=R.choice(TIMES), event=ev,
+                doing=R.choice(DOING), memory=mem, shop=shop, hours=f"{o} am to {c - 12} pm", town=R.choice(["Maple Cove", "Pebble Bay", "Fernhill",
+                "Willow Creek", "Sunny Isle", "Acorn Hollow", "Misty Pines", "Clover Field"]))
+
+
+def vil_text(v, fmt, talking_to=None):
+    """the card the game would fill in; two layouts"""
+    nb = "; ".join(f"{n} the {s} ({t}, your {r})" for n, s, t, r in v["nbs"])
+    lines = [f"You are {v['name']}, a {v['temper']} {v['species']} villager in {v['town']}. You are {TEMPERS[v['temper']]}. "
+             f"Your catchphrase is \"{v['catch']}\".",
+             f"Hobby: {v['hobby']}. Likes: {v['likes'][0][2:] if v['likes'][0].startswith('a ') else v['likes'][0][3:]}, "
+             f"{v['likes'][1].split(' ', 1)[1]}. Dislikes: {v['dislike'].split(' ', 1)[1]}.", f"Neighbours: {nb}.",
+             f"Now: {v['season']}, {v['weather']}, {v['time']}. You are {v['doing']}."]
+    if v["event"] != "none": lines.append(f"Today: {v['event']}.")
+    if v["memory"] != "none": lines.append(v["memory"])
+    lines.append(f"{v['shop'].capitalize()} is open {v['hours']}.")
+    if talking_to: lines.append(f"You are talking with {talking_to}.")
+    return ("\n" if fmt == 0 else " ").join(lines)
+
+
+def vil_plan():
+    n = R.choice([3, 4, 4, 5, 5, 6]); seq = ["greet"] if R.random() < 0.5 else []
+    pool = [k for k in VIL_INTENTS if k not in ("greet", "recall", "goodbye")]
+    while len(seq) < n - 1:
+        k = R.choice(pool)
+        if k in seq: continue
+        seq.append(k)
+        if k == "self" and R.random() < 0.7: seq.append("recall")
+    seq.append("goodbye" if R.random() < 0.4 else R.choice([k for k in pool if k not in seq]))
+    return seq[:7]
+
+
+VIL_RULES = ("Rules for the villager's lines: short and lively, 1 or 2 sentences (under 30 words); warm, playful, in the villager's own temper "
+             "and voice; say the catchphrase at the end of about one line in three, not every line; react to what was just said and to the "
+             "moment (weather, time, today's event, what you are doing, what the player did lately) when it fits, without reciting the card; "
+             "react to a gift by what you like or dislike; if asked something you do not know, say so in character; simple everyday English; "
+             "no emojis, asterisks or stage directions; never mention being an AI, a character or a game. The player writes casually.")
+
+
+def vil_prompt(v, plans):
+    ds = "\n".join(f"Talk {i + 1} (with the player): the player's lines, in order: " + "; ".join(f"({j + 1}) {VIL_INTENTS[k]}" for j, k in enumerate(p))
+                   for i, p in enumerate(plans))
+    n0 = v["nbs"][0]
+    return ("Here is a villager in a cozy life-sim game, with the game's state at this moment:\n\n" + vil_text(v, 0) + "\n\n"
+            f"Write {len(plans)} talks with the player, each a new visit:\n{ds}\n"
+            f"Then talk {len(plans) + 1}: {n0[0]} (a {n0[2]} {n0[1]}, {TEMPERS[n0[2]]}) walks up to {v['name']} and they chat about the day, 3 to 5 "
+            f"exchanges, {n0[0]} speaking first each time, each in their own voice.\n\n" + VIL_RULES + "\n\n"
+            'Return only JSON: {"talks": [{"turns": [{"player": str, "villager": str}, ...]}, ...], '
+            '"neighbour_talk": [{"neighbour": str, "villager": str}, ...]}')
+
+
+def vilbench_prompt(v):
+    n0 = v["nbs"][0]
+    return ("Here is a villager in a cozy life-sim game, with the game's state at this moment:\n\n" + vil_text(v, 0) + "\n\n"
+            "Write test lines a player might say to this villager, one of each, casual and short:\n"
+            "greet; weather (about the weather or season); doing (what are you doing?); gift_like (giving one of the things it likes, name it); "
+            "gift_dislike (giving the thing it dislikes, name it); advice (asking for a suggestion); "
+            f"neighbour (asking about {n0[0]}); event (asking what is going on today); memory (about what the player did lately; if the card has no such "
+            "line, about the player's own day); tease (a little rude); feeling (how the player feels).\n"
+            'Return only JSON: {"greet": str, "weather": str, "doing": str, "gift_like": str, "gift_dislike": str, "advice": str, "neighbour": str, '
+            '"event": str, "memory": str, "tease": str, "feeling": str}')
+
+
+def vil_rows(v, d):
+    out = []
+    for dl in (d.get("talks") or []):
+        ts = dl.get("turns") if isinstance(dl, dict) else dl
+        turns = [(clean(t.get("player", "")), clean(t.get("villager", ""))) for t in (ts or []) if isinstance(t, dict)]
+        if len(turns) < 2 or not all(p and ok_reply(r) for p, r in turns): continue
+        msgs = [{"role": "system", "content": vil_text(v, R.randrange(2))}]
+        for p, r in turns: msgs += [{"role": "user", "content": p}, {"role": "assistant", "content": r}]
+        out.append({"messages": msgs, "src": "villager"})
+    nt = d.get("neighbour_talk")
+    nt = nt.get("turns") if isinstance(nt, dict) else nt
+    turns = [(clean(t.get("neighbour", "")), clean(t.get("villager", ""))) for t in (nt or []) if isinstance(t, dict)]
+    if len(turns) >= 2 and all(p and ok_reply(r) for p, r in turns):
+        n0 = v["nbs"][0]; msgs = [{"role": "system", "content": vil_text(v, R.randrange(2), f"{n0[0]} the {n0[1]}, your {n0[3]}")}]
+        for p, r in turns: msgs += [{"role": "user", "content": p}, {"role": "assistant", "content": r}]
+        out.append({"messages": msgs, "src": "villager_nb"})
+    return out
+
+
+def vilbench_row(i, d, v):
+    keys = ["greet", "weather", "doing", "gift_like", "gift_dislike", "advice", "neighbour", "event", "memory", "tease", "feeling"]
+    if not all(isinstance(d.get(k), str) and d[k].strip() for k in keys): return None
+    probes = [{"kind": k, "turns": [clean(d[k])]} for k in keys]
+    nm = NAMES_BENCH[i % len(NAMES_BENCH)]
+    probes.append({"kind": "recall", "turns": [f"Hi, I'm {nm}!", "Oh, hi! Nice to meet you!", "Do you remember my name?"], "answer": nm})
+    probes.append({"kind": "town", "turns": [f"When is {v['shop']} open?"], "answer": v["hours"].split(" to ")[0]})
+    return {"card": vil_text(v, i % 2), "card_fields": v, "probes": probes}
+
+
+VJUDGE = ("You grade one line written by a small model playing a villager in a cozy life-sim game (think of friendly animal neighbours in a "
+          "little town).\n\nVILLAGER CARD AND GAME STATE:\n{card}\n\nCONVERSATION SO FAR:\n{conv}\n\nVILLAGER'S LINE TO GRADE:\n{reply}\n\n{note}"
+          "Score each from 0 to 2:\n"
+          "- answers: responds to what the player just said (2 = directly and sensibly, 1 = partly or vaguely, 0 = ignores it, repeats it or is nonsense)\n"
+          "- consistent: agrees with the card and the game state (2 = yes, 1 = small slip, 0 = contradicts it, e.g. loves a gift it dislikes, wrong "
+          "weather, wrong shop hours, confuses who is who)\n"
+          "- in_character: sounds like THIS villager's temper and voice (0 = talks like an AI assistant, mentions being an AI or a game, or another persona)\n"
+          "- fluent: grammatical, coherent English (0 = garbled)\n"
+          "- charm: warm, lively and fun like a good life-sim villager line (2), plain but fine (1), flat, odd or off-putting (0)\n"
+          "Then 'usable': true only if the game could show this exact line at this moment without embarrassment.\n"
+          'Return only JSON: {{"answers": int, "consistent": int, "in_character": int, "fluent": int, "charm": int, "usable": bool}}')
+
+
 def parse_json(t):
     t = re.sub(r"<think>.*?</think>", "", t, flags=re.S); a, b = t.find("{"), t.rfind("}")
     if a < 0 or b <= a: return None
@@ -322,6 +485,24 @@ def helpbench_row(i, d, c, seen):
 
 def main():
     T0 = time.time()
+    if A.mode in ("villager", "villagerbench"):
+        llm, used = engine(); print(f"[gen] {A.mode} with {used}: {A.n} requests", flush=True)
+        vs = [vil_card() for _ in range(A.n)]; seen = set(); vs = [v for v in vs if not (v["name"] in seen or seen.add(v["name"]))]
+        if A.mode == "villager": plans = [[vil_plan(), vil_plan()] for _ in vs]; prompts = [vil_prompt(v, p) for v, p in zip(vs, plans)]; mt = 2200
+        else: plans = [None] * len(vs); prompts = [vilbench_prompt(v) for v in vs]; mt = 700
+        n_ok = n_bad = 0; k = A.chunk or len(prompts); fo = open(A.out, "w"); fr = open(A.out + ".raw", "w")
+        for a in range(0, len(prompts), k):   # chunk by chunk, each written at once: a box that dies keeps what it made
+            texts = run(llm, prompts[a:a + k], 0.9 if A.mode == "villager" else 0.8, mt)
+            for v, p_, t in zip(vs[a:a + k], plans[a:a + k], texts):
+                fr.write(json.dumps({"spec": v, "plans": p_, "text": t}) + "\n")
+                d = parse_json(t)
+                if not isinstance(d, dict): n_bad += 1; continue
+                try: rows = vil_rows(v, d) if A.mode == "villager" else [x for x in [vilbench_row(a, d, v)] if x]
+                except Exception as e: print(f"[gen] skipped: {type(e).__name__}: {str(e)[:100]}", flush=True); n_bad += 1; continue
+                for x in rows: fo.write(json.dumps(x) + "\n")
+                n_ok += len(rows); n_bad += not rows
+            fo.flush(); fr.flush(); print(f"[gen] {A.mode}: {n_ok} written, {n_bad} dropped after {a + len(texts)} requests [{(time.time() - T0) / 60:.1f} min]", flush=True)
+        fo.close(); fr.close(); return
     if A.mode in ("train", "bench", "help", "helpbench"):
         if A.from_raw:
             raw = [json.loads(l) for l in open(A.from_raw)]; specs = [r["spec"] for r in raw]; plans = [r.get("plans") for r in raw]; texts = [r["text"] for r in raw]
@@ -360,13 +541,13 @@ def main():
         for r in rows:
             conv = "\n".join(("PLAYER: " if i % 2 == 0 else "NPC: ") + t for i, t in enumerate(r["turns"]))
             note = f"(For reference, the correct reply should contain: {r['answer']}.)\n\n" if r.get("answer") else ""
-            prompts.append(JUDGE.format(card=r["card"], conv=conv, reply=r["reply"] or "(empty)", note=note))
+            prompts.append((VJUDGE if r.get("villager") or "catchphrase" in r["card"] else JUDGE).format(card=r["card"], conv=conv, reply=r["reply"] or "(empty)", note=note))
         texts = run(llm, prompts, 0.0, 120); n_bad = 0
         with open(A.out, "w") as f:
             for r, t in zip(rows, texts):
                 g = parse_json(t) or {}
                 if not isinstance(g, dict) or "usable" not in g: n_bad += 1; g = g if isinstance(g, dict) else {}
-                r["judge"] = {k: g.get(k) for k in ("answers", "consistent", "in_character", "fluent", "usable")}; f.write(json.dumps(r) + "\n")
+                r["judge"] = {k: g.get(k) for k in ("answers", "consistent", "in_character", "fluent", "charm", "usable")}; f.write(json.dumps(r) + "\n")
         print(f"[judge] {len(rows)} replies graded with {used}, {n_bad} unparsed [{(time.time() - T0) / 60:.1f} min] -> {A.out}", flush=True)
 
 
