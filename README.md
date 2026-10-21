@@ -10,22 +10,23 @@
 
 | ファイル | 中身 |
 |---|---|
-| `models/agent12a_4bit.pt` | **最新**。agent11 が自分で作った返答の良いものだけで追加学習（事実の正答 74 → 80%）。迷ったらこれ |
-| `models/agent11_4bit.pt` | 1 つ前の版 |
-| `models/agent6_4bit.pt` | 1 つ前の版 |
+| `models/agent13b_4bit.pt` | **最新**。agent12a に、教師モデルに「口調がどうあれ事実は正確に」と指示して書かせた会話を追加学習（事実の正答 80 → 85%、ダークファンタジーでの名前の記憶 23 → 57%、嫌いな贈り物への反応 54 → 69%）。迷ったらこれ |
+| `models/agent12a_4bit.pt` | 1 つ前の版。agent11 が自分で作った返答の良いものだけで追加学習（事実の正答 74 → 80%） |
+| `models/agent11_4bit.pt` | 2 つ前の版 |
+| `models/agent6_4bit.pt` | 3 つ前の版 |
 | `models/npc4_4bit.pt` | 会話だけに絞った版 |
 
 ## すぐ試す
 
 ```bash
 pip install torch
-python3 village.py --model models/agent12a_4bit.pt --days 4 --out village.md   # 3 人の村人が 4 日暮らす（CPU で 1〜2 分）
-python3 goal_gen.py play --model models/agent12a_4bit.pt --n 100 --split test   # 行動選びの採点（見たことのない名前の問題）
+python3 village.py --model models/agent13b_4bit.pt --days 4 --out village.md   # 3 人の村人が 4 日暮らす（CPU で 1〜2 分）
+python3 goal_gen.py play --model models/agent13b_4bit.pt --n 100 --split test   # 行動選びの採点（見たことのない名前の問題）
 ```
 
 ```python
 from charlm_run import Model
-m = Model("models/agent12a_4bit.pt")
+m = Model("models/agent13b_4bit.pt")
 print(m.reply(["You are Tob, the blacksmith of Elm.\n\nHello! Can you fix my sword?"], temp=0.7))
 print(m.reply(["GOAL: life >= 1\nOPS: <a> life+1 gold-3 | <b> gold+2 | <c> life-1\nSTATE: life=0 gold=7"], n=260))
 ```
