@@ -145,7 +145,7 @@ if A.mode in ("reply", "sample", "rank", "turns"):
                     if RK is not None: picks.append(("rank", max(range(A.n), key=lambda j: rank_score(feats(ctx, FM.encode(txt[j]).tolist(), lps[j])))))
                     for pick, j in picks:
                         s = txt[j]
-                        f.write(json.dumps({"model": A.tag, "pick": pick, "kind": p["kind"], "card": r["card"], "turns": p["turns"], "answer": p.get("answer", ""),
+                        f.write(json.dumps({"model": A.tag, "pick": pick, "kind": p["kind"], "card": r["card"], "turns": p["turns"], "answer": p.get("answer", ""), "genre": r.get("genre"),
                                             "reply": s, "hit": hit(s, p["answer"]) if p.get("answer") else None, "ai_talk": bool(AI_TALK.search(s)),
                                             "echo": echo(s, p["turns"][-1]), "chars": len(s)}) + "\n")
                     n += 1
@@ -208,10 +208,12 @@ else:
     for r in rows:
         G[(r["model"], r["pick"], "ALL")].append(r); G[(r["model"], r["pick"], r["kind"])].append(r)
     nat = lambda x: (x.get("answers") or 0) >= 1 and (x.get("fluent") or 0) >= 1 and (x.get("consistent") or 0) >= 1   # a sensible, coherent reply
-    print(f"{'model':<14}{'pick':<6}{'kind':<10}{'n':>5}{'natural':>8}{'usable':>8}{'answers':>8}{'consist':>8}{'in-char':>8}{'fluent':>8}{'hit':>6}{'AI':>5}{'echo':>6}{'chars':>6}")
-    for (m, pk, k), rs in sorted(G.items(), key=lambda z: (z[0][0], z[0][1], z[0][2] != "ALL", z[0][2])):
+    for r in rows:   # villager rows: per game too
+        if r.get("genre"): G[(r["model"], r["pick"], "G:" + r["genre"])].append(r)
+    print(f"{'model':<14}{'pick':<6}{'kind':<10}{'n':>5}{'natural':>8}{'usable':>8}{'answers':>8}{'consist':>8}{'in-char':>8}{'fluent':>8}{'charm':>7}{'hit':>6}{'AI':>5}{'echo':>6}{'chars':>6}")
+    for (m, pk, k), rs in sorted(G.items(), key=lambda z: (z[0][0], z[0][1], z[0][2] != "ALL", not z[0][2].startswith("G:"), z[0][2])):
         j = [r["judge"] for r in rs]; mean = lambda key: sum((x.get(key) or 0) for x in j) / len(j)
         hs = [r["hit"] for r in rs if r["hit"] is not None]
         print(f"{m:<14}{pk:<6}{k:<10}{len(rs):>5}{100 * sum(nat(x) for x in j) / len(j):>7.0f}%{100 * sum(bool(x.get('usable')) for x in j) / len(j):>7.0f}%{mean('answers'):>8.2f}{mean('consistent'):>8.2f}"
-              f"{mean('in_character'):>8.2f}{mean('fluent'):>8.2f}{(f'{100 * sum(hs) / len(hs):.0f}%' if hs else '-'):>6}"
+              f"{mean('in_character'):>8.2f}{mean('fluent'):>8.2f}{mean('charm'):>7.2f}{(f'{100 * sum(hs) / len(hs):.0f}%' if hs else '-'):>6}"
               f"{100 * sum(r['ai_talk'] for r in rs) / len(rs):>4.0f}%{100 * sum(r['echo'] for r in rs) / len(rs):>5.0f}%{sum(r['chars'] for r in rs) / len(rs):>6.0f}")
