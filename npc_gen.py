@@ -42,6 +42,7 @@ ap.add_argument("--min-grade", type=int, default=1, help="vfilter: a line graded
 ap.add_argument("--strict", type=int, default=0, help="vfilter: 1, the judge is told to give 2 only to lines a player would really enjoy")
 ap.add_argument("--variant", default="checklist", help="linejudge: plain, checklist, or fewshot (checklist with graded examples from --shots)")
 ap.add_argument("--shots", default="", help="linejudge fewshot: gold rows to show as examples (and leave out of the output)")
+ap.add_argument("--facts", type=int, default=0, help="villager: 1, every talk asks at least two facts (the player's name, a shop's hours, gifts, what is sold) and the facts must be right")
 ap.add_argument("--genres", default="cozy", help="villager modes: the games to mix, e.g. cozy,friends,dark")
 ap.add_argument("--max-seqs", type=int, default=256, help="sequences in flight (fewer on a 12 GB card: the sampler's warm-up wants their logits at once)")
 A = ap.parse_args()
@@ -328,7 +329,7 @@ GEN_INTENTS = {"cozy": None,
                            "dream": "asks about their dream or what they want", "goodbye": "says goodbye"},
                "dark": {"greet": "greets the character", "who": "asks who they are or why they are here", "place": "asks about this place or where to go next",
                         "rumour": "asks what they know (a rumour)", "memory": "brings up what the player did lately (the memory on the card)",
-                        "help": "asks for help, a trade or a service they offer", "gift_other": "offers them an item (name it: a flask, a ring, a key, an ember, souls)",
+                        "help": "asks for help, a trade or a service they offer", "offer": "asks what the character sells or offers", "gift_other": "offers them an item (name it: a flask, a ring, a key, an ember, souls)",
                         "feeling": "says they are tired, hurt or afraid", "tease": "is rude or threatens them", "despair": "asks if there is any hope",
                         "self": "tells them their name", "recall": "asks them to remember what the player said about themselves", "goodbye": "says farewell"}}
 
@@ -376,7 +377,7 @@ def gen_prompt(v, plans):
             f"Then talk {len(plans) + 1}: {n0[0]} ({n0[2]}) comes to {v['name']} and they talk, 3 to 5 exchanges, {n0[0]} speaking first each time.\n\n"
             "Rules for the character's lines: 1 or 2 short sentences (under 30 words); " + TONE[v["genre"]] + "; react to what was just said and to the "
             "moment when it fits, without reciting the card; if asked something you do not know, say so in character; simple English; no emojis, "
-            "asterisks or stage directions; never mention being an AI, a character or a game. The player writes casually.\n\n"
+            "asterisks or stage directions; never mention being an AI, a character or a game. The player writes casually." + (FACT_RULES if A.facts else "") + "\n\n"
             'Return only JSON: {"talks": [{"turns": [{"player": str, "villager": str}, ...]}, ...], "neighbour_talk": [{"neighbour": str, "villager": str}, ...]}')
 
 
@@ -448,6 +449,23 @@ VIL_RULES = ("Rules for the villager's lines: short and lively, 1 or 2 sentences
              "no emojis, asterisks or stage directions; never mention being an AI, a character or a game. The player writes casually.")
 
 
+FACT_RULES = (" Facts must be exactly right, whatever the character's voice: when the player has told their name and asks if you remember "
+              "it, say the name; when asked when a shop opens, give the exact hours on the card; a gift the card says you like makes you "
+              "happy, one you dislike you refuse or grimace at, never the other way round; when asked what you sell or offer, say it plainly. "
+              "A cryptic, grumpy or shy character still gives the fact, in its own words.")
+FACT_INTENTS = {"cozy": ["town", "gift_like", "gift_dislike", "self"], "friends": ["self", "neighbour", "food"], "dark": ["self", "offer", "memory"]}
+
+
+def with_facts(seq, genre):
+    """at least two fact purposes in a talk (self brings recall after it)"""
+    have = [k for k in seq if k in FACT_INTENTS[genre]]
+    for k in R.sample(FACT_INTENTS[genre], len(FACT_INTENTS[genre])):
+        if len(have) >= 2: break
+        if k not in seq: seq.insert(R.randint(1 if seq and seq[0] == "greet" else 0, max(0, len(seq) - 1)), k); have.append(k)
+    if "self" in seq and "recall" not in seq: seq.insert(seq.index("self") + 1 + R.randint(0, 1), "recall")
+    return seq[:8]
+
+
 def vil_prompt(v, plans):
     ds = "\n".join(f"Talk {i + 1} (with the player): the player's lines, in order: " + "; ".join(f"({j + 1}) {VIL_INTENTS[k]}" for j, k in enumerate(p))
                    for i, p in enumerate(plans))
@@ -455,7 +473,7 @@ def vil_prompt(v, plans):
     return ("Here is a villager in a cozy life-sim game, with the game's state at this moment:\n\n" + vil_text(v, 0) + "\n\n"
             f"Write {len(plans)} talks with the player, each a new visit:\n{ds}\n"
             f"Then talk {len(plans) + 1}: {n0[0]} (a {n0[2]} {n0[1]}, {TEMPERS[n0[2]]}) walks up to {v['name']} and they chat about the day, 3 to 5 "
-            f"exchanges, {n0[0]} speaking first each time, each in their own voice.\n\n" + VIL_RULES + "\n\n"
+            f"exchanges, {n0[0]} speaking first each time, each in their own voice.\n\n" + VIL_RULES + (FACT_RULES if A.facts else "") + "\n\n"
             'Return only JSON: {"talks": [{"turns": [{"player": str, "villager": str}, ...]}, ...], '
             '"neighbour_talk": [{"neighbour": str, "villager": str}, ...]}')
 
@@ -535,14 +553,22 @@ FSTRICT = ("Be strict, like an editor choosing lines for a shipped game: give 2 
            "slightly odd or slightly off-topic lines get 1. Most lines in a typical batch should NOT get 2.\n")
 
 
+SHOTS = ""
+
+
 def vfilter(llm):
+    global SHOTS
     rows = [json.loads(l) for l in open(A.inp)]; prompts = []
+    if A.shots:   # the reviewer's graded lines as examples of the bar
+        SHOTS = ("Examples of single lines graded by the game's editor (the bar to apply):\n\n" + "\n---\n".join(lj_item(json.loads(l), True) for l in open(A.shots))
+                 + "\n=== Now the talk to grade ===\n\n")
     for r in rows:
         ms = r["messages"]; card = next((m["content"] for m in ms if m["role"] == "system"), "(none)"); k = 0; talk = []
         for m in ms:
             if m["role"] == "user": talk.append(f"OTHER: {m['content']}")
             elif m["role"] == "assistant": k += 1; talk.append(f"C{k}: {m['content']}")
         q = FJUDGE.format(card=card, talk="\n".join(talk))
+        if SHOTS: q = SHOTS + q
         if A.strict: q = q.replace("Return only JSON", FSTRICT + "Return only JSON")
         prompts.append(q)
     texts = run(llm, prompts, 0.0, 120); kept = cut = dropped = unparsed = 0; hist = collections.Counter()
@@ -701,6 +727,7 @@ def main():
         seen = set(); vs = [v for v in vs if not (v["name"] in seen or seen.add(v["name"]))]
         if A.mode == "villager":
             plans = [[vil_plan(), vil_plan()] if v.get("genre", "cozy") == "cozy" else [gen_plan(v["genre"]), gen_plan(v["genre"])] for v in vs]
+            if A.facts: plans = [[with_facts(p, v.get("genre", "cozy")) for p in ps] for v, ps in zip(vs, plans)]
             prompts = [vil_prompt(v, p) if v.get("genre", "cozy") == "cozy" else gen_prompt(v, p) for v, p in zip(vs, plans)]; mt = 2200
         else: plans = [None] * len(vs); prompts = [vilbench_prompt(v) if v.get("genre", "cozy") == "cozy" else genbench_prompt(v) for v in vs]; mt = 700
         n_ok = n_bad = 0; k = A.chunk or len(prompts); fo = open(A.out, "w"); fr = open(A.out + ".raw", "w")
