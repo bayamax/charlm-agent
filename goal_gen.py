@@ -26,13 +26,21 @@ ap.add_argument("--model", default=""); ap.add_argument("--max-steps", type=int,
 ap.add_argument("--think", type=int, default=1, help="1: the answer starts with a short worked trace {...} (the steps the rule takes)")
 ap.add_argument("--repeat", type=int, default=1, help="1: the game sends the goal and the operations again every turn (they stay near)")
 ap.add_argument("--check", type=int, default=1, help="1: the trace reads out every need of a helper before calling it ok (agent5 and before: 0)")
+ap.add_argument("--shuffle", type=int, default=1, help="1: STATE lists the variables in a random order (agent6 and before: the goal's variable first, a crutch the model leaned on)")
+ap.add_argument("--raise-fx", type=int, default=1, help="1: the step that raises a missing need names each raiser with its effect ('tools up: forge+2'; agent6 and before: the name only)")
 A = ap.parse_args()
 R = random.Random(A.seed + (0 if A.split == "train" else 77777))
 TRAIN = A.split == "train"
 VARS = (["life", "gold", "food", "mana", "heat", "fuel", "ammo", "water", "wood", "stone", "energy", "score", "hp", "keys", "coins", "light",
-         "speed", "trust", "noise", "stock", "power", "air", "rest", "fun"] if TRAIN else
+         "speed", "trust", "noise", "stock", "power", "air", "rest", "fun",
+         # names other kinds of games use (a cozy life-sim, a friend-collection sim, a dark fantasy, ...)
+         "bells", "fruit", "fish", "bugs", "flowers", "friendship", "hunger", "mood", "stress", "love", "courage", "cash", "souls", "stamina",
+         "flasks", "humanity", "embers", "arrows", "herbs", "sanity", "xp", "rep", "faith", "poise", "luck", "hearts", "sleep", "chores"] if TRAIN else
         ["zorb", "plim", "quax", "tenk", "vasp", "drell", "mup", "yolt", "frib", "glon"])
-OPN = list("abcdefghijklmnopqrstuvwxyz") + (["eat", "rest", "buy", "sell", "dig", "chop", "heal", "work", "pray", "run", "hide", "fix", "drink", "mine"]
+OPN = list("abcdefghijklmnopqrstuvwxyz") + (["eat", "rest", "buy", "sell", "dig", "chop", "heal", "work", "pray", "run", "hide", "fix", "drink", "mine",
+                                            "shake_tree", "sell_fruit", "catch_fish", "water_flowers", "nap", "chat", "give_gift", "eat_ramen", "confess",
+                                            "make_up", "sing", "study", "rest_at_fire", "drink_flask", "parry", "roll", "buy_arrows", "forge_blade",
+                                            "kindle", "flee", "pray_at_altar", "trade_souls", "visit_shop", "go_home", "clean_room", "cook"]
                                            if TRAIN else ["blip", "kesh", "vorn", "tazz", "wib"])
 CMP = [">=", "<=", ">", "<", "=="]
 
@@ -98,7 +106,9 @@ def policy(st, goals, ops):
     nv, nk = next(((x, kk) for x, kk in first["needs"] if st[x] < kk), (None, None))
     if nv:
         raisers = [o for o in ops if can(o, st) and any(x == nv and dd > 0 for x, dd in o["eff"])]
-        if raisers: parts.append(f"{nv} up: {raisers[0]['name']}"); return raisers[0]["name"], ". ".join(parts)
+        if raisers:
+            fx = " ".join(o["name"] + next(f"{dd:+d}" for x, dd in o["eff"] if x == nv) for o in raisers) if A.raise_fx else raisers[0]["name"]
+            parts.append(f"{nv} up: {fx}"); return raisers[0]["name"], ". ".join(parts)
     return "none", ". ".join(parts) + ". stuck"
 
 
@@ -145,7 +155,10 @@ def show_ops(ops):
 
 
 def head(goals, ops): return "GOAL: " + " and ".join(f"{g} {c} {k}" for g, c, k in goals) + "\nOPS: " + show_ops(ops)
-def state_line(st): return "STATE: " + " ".join(f"{v}={x}" for v, x in st.items())
+def state_line(st):
+    ks = list(st)
+    if A.shuffle: ks = sorted(ks, key=lambda k: R.random())   # a fresh order each time
+    return "STATE: " + " ".join(f"{v}={st[v]}" for v in ks)
 
 
 def data(n):
