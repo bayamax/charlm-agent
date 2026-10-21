@@ -18,6 +18,8 @@
   villagerbench  held-out villagers (their own names) with probes of those kinds
   vfilter  (the user: grade the teacher's own lines too) every character line of generated talks graded by the judge
          model; a talk is cut before its first bad line and dropped when less than two exchanges are left
+  linejudge  one line at a time ({"id", "card", "talk", "line"} rows, e.g. eval/gold_villager_lines.jsonl), with a prompt
+         variant (--variant plain|checklist|fewshot): to score judges against a reviewer's gold grades (judge_audit.py)
   judge  grades replies (from npc_bench.py) against the card and the conversation: answers it, fits the card, in
          character, fluent, and usable as-is in a game
 
@@ -28,7 +30,7 @@
 import argparse, collections, json, os, random, re, sys, time
 
 ap = argparse.ArgumentParser()
-ap.add_argument("mode", choices=["train", "bench", "judge", "help", "helpbench", "villager", "villagerbench", "vfilter"])
+ap.add_argument("mode", choices=["train", "bench", "judge", "help", "helpbench", "villager", "villagerbench", "vfilter", "linejudge"])
 ap.add_argument("--n", type=int, default=100, help="requests (train: one card and two dialogues each; bench: one card each)")
 ap.add_argument("--out", required=True); ap.add_argument("--inp", default="")
 ap.add_argument("--from-raw", default="", help="parse the outputs a run kept (OUT.raw) again instead of generating")
@@ -38,10 +40,12 @@ ap.add_argument("--chunk", type=int, default=0, help="prompts per call, with a p
 ap.add_argument("--eager", type=int, default=0, help="1: no CUDA graphs (their memory matters on 12 GB)")
 ap.add_argument("--min-grade", type=int, default=1, help="vfilter: a line graded below this is bad (2: keep only talks of lines a player would enjoy)")
 ap.add_argument("--strict", type=int, default=0, help="vfilter: 1, the judge is told to give 2 only to lines a player would really enjoy")
+ap.add_argument("--variant", default="checklist", help="linejudge: plain, checklist, or fewshot (checklist with graded examples from --shots)")
+ap.add_argument("--shots", default="", help="linejudge fewshot: gold rows to show as examples (and leave out of the output)")
 ap.add_argument("--genres", default="cozy", help="villager modes: the games to mix, e.g. cozy,friends,dark")
 ap.add_argument("--max-seqs", type=int, default=256, help="sequences in flight (fewer on a 12 GB card: the sampler's warm-up wants their logits at once)")
 A = ap.parse_args()
-R = random.Random(A.seed + {"train": 0, "bench": 1000003, "judge": 7, "help": 3000017, "helpbench": 4000037, "villager": 5000011, "villagerbench": 6000053, "vfilter": 11}[A.mode])
+R = random.Random(A.seed + {"train": 0, "bench": 1000003, "judge": 7, "help": 3000017, "helpbench": 4000037, "villager": 5000011, "villagerbench": 6000053, "vfilter": 11, "linejudge": 13}[A.mode])
 
 ROLES = ["blacksmith", "innkeeper", "town guard", "travelling merchant", "farmer", "village priest", "street kid", "ship captain", "herbalist",
          "librarian", "tavern bard", "retired adventurer", "mine foreman", "fisherwoman", "butler of a noble house", "stable hand", "wizard's apprentice",
@@ -565,6 +569,42 @@ def vfilter(llm):
           f"line grades {dict(sorted(hist.items()))} -> {A.out}", flush=True)
 
 
+LJ_HEAD = ("You grade one line spoken by a character in a video game (training data for a small model). Below is the character's card "
+           "with the game's state, what was said so far (OTHER = the one talking to the character), and the character's next line.\n\n")
+LJ_CHECK = ("Check these first; any one of them makes the line 0:\n"
+            "- it is only a name or a word or two, or repeats the other's line or its own earlier line\n"
+            "- it addresses someone by the character's OWN name, or mixes up who is who\n"
+            "- it ignores what OTHER just said, or answers something else\n"
+            "- it contradicts the card: loves a gift the card says it dislikes, hates one it likes, wrong hours, wrong weather or event\n"
+            "- it breaks character (mentions being a character, an AI or a game) or has broken English\n"
+            "Otherwise: 2 = a line a player would really enjoy here (natural, in this character's own voice and the game's tone, answers well); "
+            "1 = fine but plain, generic or a little off.\n")
+LJ_TAIL = 'Return only JSON: {{"grade": int}}'
+
+
+def lj_item(x, with_grade=False):
+    talk = "\n".join(("OTHER: " if (len(x["talk"]) - i) % 2 == 1 else "CHARACTER: ") + t for i, t in enumerate(x["talk"])) or "(nothing yet)"
+    s_ = f"CARD:\n{x['card']}\n\nSO FAR:\n{talk}\n\nCHARACTER'S LINE:\n{x['line']}\n"
+    return s_ + (f"GRADE: {x['grade']}\n" if with_grade else "")
+
+
+def linejudge(llm):
+    rows = [json.loads(l) for l in open(A.inp)]; shots = [json.loads(l) for l in open(A.shots)] if A.shots else []
+    sid = {r["id"] for r in shots}; rows = [r for r in rows if r["id"] not in sid]
+    ex = ""
+    if A.variant == "fewshot" and shots:
+        ex = "Examples graded by the game's editor:\n\n" + "\n---\n".join(lj_item(x, True) for x in shots) + "\n=== Now grade this one ===\n\n"
+    rule = LJ_CHECK if A.variant in ("checklist", "fewshot") else "2 = good, 1 = fine but plain, 0 = bad.\n"
+    prompts = [LJ_HEAD + ex + lj_item(r) + "\n" + rule + LJ_TAIL.format() for r in rows]
+    texts = run(llm, prompts, 0.0, 40); n_bad = 0
+    with open(A.out, "w") as f:
+        for r, t in zip(rows, texts):
+            g = (parse_json(t) or {}).get("grade") if isinstance(parse_json(t), dict) else None
+            if g not in (0, 1, 2): n_bad += 1; g = 1
+            f.write(json.dumps({"id": r["id"], "judge": g, "src": r.get("src")}) + "\n")
+    print(f"[linejudge] {A.variant}: {len(rows)} lines, {n_bad} unparsed -> {A.out}", flush=True)
+
+
 def parse_json(t):
     t = re.sub(r"<think>.*?</think>", "", t, flags=re.S); a, b = t.find("{"), t.rfind("}")
     if a < 0 or b <= a: return None
@@ -651,6 +691,8 @@ def helpbench_row(i, d, c, seen):
 
 def main():
     T0 = time.time()
+    if A.mode == "linejudge":
+        llm, used = engine(); print(f"[linejudge] with {used}", flush=True); linejudge(llm); return
     if A.mode == "vfilter":
         llm, used = engine(); print(f"[filter] with {used}", flush=True); vfilter(llm); return
     if A.mode in ("villager", "villagerbench"):
