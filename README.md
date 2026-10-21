@@ -10,7 +10,8 @@
 
 | ファイル | 中身 |
 |---|---|
-| `models/agent11_4bit.pt` | **最新**。会話 + 行動選び、3 種類のゲームの住人らしい会話。迷ったらこれ |
+| `models/agent12a_4bit.pt` | **最新**。agent11 が自分で作った返答の良いものだけで追加学習（事実の正答 74 → 80%）。迷ったらこれ |
+| `models/agent11_4bit.pt` | 1 つ前の版 |
 | `models/agent6_4bit.pt` | 1 つ前の版 |
 | `models/npc4_4bit.pt` | 会話だけに絞った版 |
 
@@ -18,13 +19,13 @@
 
 ```bash
 pip install torch
-python3 village.py --model models/agent11_4bit.pt --days 4 --out village.md   # 3 人の村人が 4 日暮らす（CPU で 1〜2 分）
-python3 goal_gen.py play --model models/agent11_4bit.pt --n 100 --split test   # 行動選びの採点（見たことのない名前の問題）
+python3 village.py --model models/agent12a_4bit.pt --days 4 --out village.md   # 3 人の村人が 4 日暮らす（CPU で 1〜2 分）
+python3 goal_gen.py play --model models/agent12a_4bit.pt --n 100 --split test   # 行動選びの採点（見たことのない名前の問題）
 ```
 
 ```python
 from charlm_run import Model
-m = Model("models/agent11_4bit.pt")
+m = Model("models/agent12a_4bit.pt")
 print(m.reply(["You are Tob, the blacksmith of Elm.\n\nHello! Can you fix my sword?"], temp=0.7))
 print(m.reply(["GOAL: life >= 1\nOPS: <a> life+1 gold-3 | <b> gold+2 | <c> life-1\nSTATE: life=0 gold=7"], n=260))
 ```
@@ -39,6 +40,7 @@ print(m.reply(["GOAL: life >= 1\nOPS: <a> life+1 gold-3 | <b> gold+2 | <c> life-
 | | `charlm_chat.py` | 人物設定と台詞を渡して返答の候補を複数出す（通常版のモデル用） |
 | **事前学習** | `charlm_prep.py` | WikiText-103 / FineWeb-Edu / SmolTalk を文字列のデータにする |
 | | `charlm.py`, `charlm2.py` | 事前学習（層を 2 → 16 に増やしながら学習） |
+| **自己学習** | `rft_prep.py`, `charlm_dpo.py` | モデル自身の返答を採点して、良いものだけで学習（RFT）／良い・悪いの差を教える（DPO） |
 | **追加学習** | `charlm_sft.py` | 会話の追加学習。途中保存と再開（`--ckpt-every`）、最後に 4bit 化まで |
 | | `charlm_gptq.py`, `q4.py` | 4bit 量子化（GPTQ） |
 | **データ作り** | `goal_gen.py` | 行動選びの問題と、考えの筋道つきの答えを作る（`data`）／モデルに解かせて採点（`play`） |
